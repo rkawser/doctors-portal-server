@@ -1,8 +1,10 @@
 const express = require('express')
 const app = express()
-const { MongoClient, ServerApiVersion } = require('mongodb');
+const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const jwt = require('jsonwebtoken');
 require('dotenv').config();
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+
 const cors = require('cors')
 const port = process.env.PORT || 5000;
 
@@ -17,7 +19,6 @@ const client = new MongoClient(uri, { useNewUrlParser: true, useUnifiedTopology:
 
 function verifyJwt(req, res, next) {
     const authHeader = req.headers.authorization;
-
     if (!authHeader) {
         return res.status(401).send({ message: 'UnAuthrized access' })
     }
@@ -40,27 +41,37 @@ async function run() {
         const serviceCollection = client.db('doctors_portal').collection('services');
         const bookingCollection = client.db('doctors_portal').collection('booking');
         const userCollection = client.db('doctors_portal').collection('users');
+        const doctorsCollection = client.db('doctors_portal').collection('doctors');
 
 
-        //admin api
-        app.put('/users/admin/:email', verifyJwt, async (req, res) => {
-            const email = req?.params.email;
+        //verifyADmin
+
+        const verifyAdmin = async (req, res, next) => {
             const requester = req?.decoded.email;
-            
             const requesterAccount = await userCollection.findOne({ email: requester });
             if (requesterAccount.role === 'admin') {
-                const filter = { email: email }
-                const updateDoc = {
-                    $set: { role: 'admin' }
-                };
-                const result = await userCollection.updateOne(filter, updateDoc);
-                res.send(result);
+                next();
             }
             else {
                 res.status(403).send({ message: 'Forbidden' });
             }
+        }
 
-        })
+
+        //admin api
+        app.put('/users/admin/:email', verifyJwt, verifyAdmin, async (req, res) => {
+            const email = req?.params.email;
+
+            const filter = { email: email }
+            const updateDoc = {
+                $set: { role: 'admin' }
+            };
+            const result = await userCollection.updateOne(filter, updateDoc);
+            res.send(result);
+        }
+
+
+        )
 
 
         //admin api 
@@ -68,7 +79,7 @@ async function run() {
             const email = req.params.email;
             const user = await userCollection.findOne({ email: email })
             const isAdmin = user.role === 'admin'
-            res.send({admin :isAdmin});
+            res.send({ admin: isAdmin });
         })
 
 
@@ -83,7 +94,7 @@ async function run() {
 
             const result = await userCollection.updateOne(filter, updateDoc, options);
             const token = jwt.sign({ email: email }, process.env.ACCESS_TOKEN_SECRET, {
-                expiresIn: '1h'
+                expiresIn: '100h'
             })
             res.send({ result, token });
         })
@@ -95,10 +106,28 @@ async function run() {
             res.send(result)
         })
 
+        //post payment api
+
+        app.post('/create-paymant-intent', verifyJwt, async (req, res) => {
+            const service = req.body;
+            const price = service.price;
+            const amount = price * 100;
+            const paymentintent = await stripe.paymentIntents.create({
+                amount: amount,
+                currency: "usd",
+                payment_method_types: ['card']
+            })
+
+            res.send({
+                clientSecret: paymentintent.client_secret,
+            });
+
+        })
+
 
         app.get('/services', async (req, res) => {
             const query = {};
-            const cursor = serviceCollection.find(query)
+            const cursor = serviceCollection.find(query).project({ name: 1 })
             const result = await cursor.toArray()
             res.send(result)
         })
@@ -118,10 +147,10 @@ async function run() {
 
         //get booking
 
-        app.get('/mybooking', verifyJwt, async (req, res) => {
+        app.get('/mybooking', verifyJwt, verifyAdmin, async (req, res) => {
             const patient = req.query.patient;
             const decodedEmail = req?.decoded?.email
-            
+
             if (patient === decodedEmail) {
                 const query = { patient: patient }
                 const booking = await bookingCollection.find(query).toArray();
@@ -130,6 +159,15 @@ async function run() {
                 res.status(403).send({ message: 'Forbidden Access' })
             }
 
+        })
+
+
+        // get boking one
+        app.get('/booking/:id', verifyJwt, async (req, res) => {
+            const id = req.params.id;
+            const query = { _id: ObjectId(id) };
+            const booking = await bookingCollection.findOne(query);
+            res.send(booking);
         })
 
 
@@ -152,6 +190,29 @@ async function run() {
             })
 
             res.send(services)
+        })
+
+
+        //add doctors
+        app.post('/doctor', verifyJwt, async (req, res) => {
+            const body = req.body;
+            const result = await doctorsCollection.insertOne(body);
+            res.send(result);
+        })
+
+        //get doctors
+
+        app.get('/doctor', verifyJwt, verifyAdmin, async (req, res) => {
+            const query = {};
+            const cursor = await doctorsCollection.find(query).toArray();
+            res.send(cursor)
+        });
+
+        app.delete('/doctor/:email', verifyJwt, verifyAdmin, async (req, res) => {
+            const email = req.params.email;
+            const query = { email: email }
+            const result = await doctorsCollection.deleteOne(query)
+            res.send(result)
         })
 
 
